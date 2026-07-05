@@ -74,6 +74,30 @@ Drop a JSON file into `NetworkDefinitions/` following the schema in `london-unde
 |----------|---------|---------|
 | `TUBEMAPPER_NETWORK` | `../NetworkDefinitions/london-underground.json` | Network definition path |
 
+## CI / CD
+
+Every push to `main` and every tag `v*` triggers GitHub Actions:
+
+| Workflow | Trigger | Artifacts |
+|----------|---------|-----------|
+| `flutter analyze` | Every PR + push | Lint results |
+| Android APK | Push to main + tags | `tubemapper-android-debug.apk` |
+| iOS debug | Push to main + tags | `Runner.app` (unsigned) |
+| Release | Tag `v*` | GitHub Release with APK + iOS app |
+
+**Release a new version:**
+```bash
+# Bump the version number in pubspec.yaml
+make bump
+
+# Tag and push — GitHub Actions builds + attaches the artifacts
+make release
+```
+
+The release workflow builds both Android APK and iOS debug builds, attaches them to a GitHub Release, and auto-generates release notes from commits.
+
+**For CI:** The server URL is injected via `--dart-define=SERVER_URL=...`. Set it in `.github/workflows/build.yml` under `env.SERVER_URL` for your production server address.
+
 ## Privacy
 
 - No user accounts — ephemeral device tokens only

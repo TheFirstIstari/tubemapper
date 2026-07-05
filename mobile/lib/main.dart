@@ -39,7 +39,13 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String _serverUrl = 'http://localhost:3000';
+  // Server URL: override via --dart-define=SERVER_URL=https://...
+  // CI builds inject a production URL; local dev defaults to localhost.
+  static const String _defaultUrl = String.fromEnvironment(
+    'SERVER_URL',
+    defaultValue: 'http://localhost:3000',
+  );
+  String _serverUrl = _defaultUrl;
   String _deviceId = 'device-${DateTime.now().millisecondsSinceEpoch}';
 
   late final ApiClient _api;
