@@ -1,158 +1,151 @@
-# 3D Model Format Specification for Tube Map Viewer
+# 3D Model Format Specification
 
-## Overview
-This document specifies the output format for 3D rendering of tube/subway maps. The format evolves from the existing JSON structure to support 3D visualization while maintaining compatibility with 2D use cases.
+## Recommendation: Dual-Format Approach
 
-## Recommended Format: glTF 2.0
-We recommend using **glTF 2.0** (Binary GLB) as the primary 3D model format because:
-- Industry standard for 3D web and mobile applications
-- Efficient binary format with JSON metadata
-- Supports PBR materials, animations, and extensions
-- Well-supported in Flutter via `model_viewer_plus` and `flutter_gltf`
-- Allows embedding of multiple scenes (LODs) in a single file
+For v1, use a **custom JSON format** (not glTF). Reasons:
+- No dependency on glTF libraries for the server
+- Mobile app can parse with `dart:convert` — zero new dependencies
+- Backward-compatible with existing GET /api/v1/model endpoint
+- glTF adds complexity (binary buffers, accessors, samplers) with no benefit at current scale
 
-Alternative: Custom JSON format for simple prototypes, but glTF is preferred for production.
+Migrate to glTF Binary (.glb) in v2 when:
+- The mobile app needs to render hundreds of edges simultaneously
+- The model includes textures, materials, or animations
+- A WebGL/Flutter 3D library is chosen that natively reads glTF
 
-## Coordinate System Transformation
-1. **WGS84** (input): Latitude, longitude, elevation (meters above sea level)
-2. **Local ENU** (East-North-Up): Tangent plane projection centered at map origin
-   - Origin: Arbitrary reference point (e.g., first station or map center)
-   - Conversion: Use geodetic to ENU formulas (e.g., via GeographicLib or PROJ)
-3. **3D Scene Coordinates**: Right-handed system (X=East, Y=Up, Z=North) with Y up for compatibility with most 3D engines
+## Coordinate System
 
-## Data Structure
-The glTF file contains:
-- **Buffer**: Binary geometry data (vertices, normals, UVs, indices)
-- **BufferViews**: Slices into the buffer for different attributes
-- **Accessors**: Typed access to bufferView data
-- **Materials**: PBR materials for visual encoding
-- **Meshes**: Tube geometries and station markers
-- **Nodes**: Scene hierarchy (optional grouping by line)
-- **Scene**: Root scene containing all nodes
-
-### Per-Edge Geometry Representation
-Each edge (track segment between stations) is represented as:
-1. **Spline Curve**: Cubic Hermite spline defined by:
-   - Start/end points (WGS84 converted to ENU)
-   - Start/end tangents (derived from adjacent edges for C1 continuity)
-   - Stored as: 4 control points per segment (p0, p1, p2, p3) in ENU space
-2. **Tube Geometry**: Extruded circular profile along spline:
-   - Radius: Constant (e.g., 1.5 meters) or variable based on line/traffic
-   - Tessellation: Configurable (default 16 segments around circumference)
-   - Spline sampling: Adaptive based on curvature (more points where curvature high)
-
-### Spline Storage in glTF
-Option A (Recommended): Store as mesh with vertices/tangents:
-- Vertex attribute: `POSITION` (spline control points)
-- Vertex attribute: `TANGENT` (outgoing tangent vector)
-- Vertex attribute: `NORMAL` (incoming tangent vector)
-- Material properties encoded via vertex colors or texture coordinates
-
-Option B: Store spline as accessor data and generate tube in shader (requires custom extension).
-
-### Visual Encoding of Statistics
-Per-edge statistics mapped to visual properties:
-- **Average Speed**: Color gradient (blue=slow, red=fast) via material baseColor
-- **Trace Count**: Tube radius or extrusion scale (more traces = thicker tube)
-- **Acceleration**: Emissive intensity or pattern (optional)
-
-Implementation: Use vertex colors or material properties:
-- Vertex color: RGB = speed encoding, A = trace count normalized
-- Or: Material metallic/roughness for speed, emissive for acceleration
-
-## Level of Detail (LOD) Strategy
-For mobile rendering, implement multiple LODs:
-1. **High Detail**: Full tube mesh with 16-32 radial segments, spline sampled every 2m
-2. **Medium Detail**: 8-12 radial segments, spline sampled every 5m
-3. **Low Detail**: 4-6 radial segments, spline sampled every 10m, or replaced by line strips
-4. **Impostor**: For distant edges, use billboarded quad with pre-rendered render
-
-LOD selection based on:
-- Distance from camera
-- Screen space error metric
-- Frustum culling
-
-Store multiple mesh primitives per edge under different primitives with varying attributes.
-
-## Station Representation
-Stations as:
-- **Geometry**: Sphere or rounded cube (radius 2-3m)
-- **Properties**: 
-  - Color: Line color(s) of connecting edges (blended if multiple lines)
-  - Emissive: Passenger volume (optional)
-  - Label: Billboarded text or texture atlas
-
-## File Structure Example
 ```
-tube_map.glb
-├─ scene (RootNode)
-│  ├─ Line_0_Group (Node)
-│  │  ├─ Edge_0_Mesh (MeshPrimitive)
-│  │  │  ├─ attributes: POSITION, NORMAL, TANGENT, COLOR_0
-│  │  │  ├─ material: EdgeMaterial
-│  │  │  ├─ mode: TRIANGLES
-│  │  │  └─ targets: [LOD1_mesh, LOD2_mesh] (optional)
-│  │  └─ Edge_1_Mesh ...
-│  ├─ Line_1_Group ...
-│  └─ Stations_Group
-│     ├─ Station_0_Mesh (sphere)
-│     └─ Station_1_Mesh ...
-├─ materials
-│  ├─ EdgeMaterial (PBR metallicRoughness)
-│  │  ├─ baseColorFactor: [0.2, 0.6, 0.8, 1.0] (speed-based)
-│  │  ├─ metallicFactor: 0.0
-│  │  ├─ roughnessFactor: 0.9
-│  │  └─ emissiveFactor: [accel_r, accel_g, accel_b]
-│  └─ StationMaterial
-└─ accessors and buffers for geometry data
+WGS84 (lat, lon, elevation) → ENU (meters) → 3D Scene (meters, Y-up)
 ```
 
-## Recommended Flutter Packages
-1. **`model_viewer_plus`**: Easy glTF viewing with AR support
-   - Dependencies: `model_viewer_plus: ^3.0.0`
-   - Features: Camera controls, background, AR mode
-2. **`flutter_gltf`**: Lower-level glTF parsing for custom rendering
-   - Use when needing direct access to mesh data or custom shaders
-3. **`vector_math`**: For ENU/WGS84 conversion math
-4. **`flutter_riverpod` or `provider`**: For state management of LOD selection
+1. Choose an origin station (e.g., "oxford-circus") as ENU reference point
+2. Convert all station lat/lon/elevation to ENU meters via geodetic transform
+3. Spline points are stored in ENU meters relative to the same origin
+4. 3D scene uses Y-up convention
 
-## Implementation Notes
-- **Coordinate Precision**: Use single-precision float (glTF default) - sufficient for city-scale maps with ENU origin
-- **File Size Optimization**: 
-  - Draco mesh compression extension
-  - Quantize vertex attributes where possible (positions to 16-bit)
-  - BasisU compression for textures (if using texture-based labels)
-- **Streaming**: For large cities, consider splitting by geographic tiles with separate glTF files
-- **Animation**: Optional: train movement along splines using glTF animations or custom vertex shader
+## Spline Representation
 
-## Backward Compatibility
-The 3D format can coexist with existing 2D JSON:
-- Same station/line/edge IDs
-- Additional fields for 3D can be ignored by 2D clients
-- Conversion utility: Generate both formats from common internal representation
+For each edge, store **Catmull-Rom control points** (4 per segment):
 
-## Example snplien representation in ENU (meters)
-```
-Edge {
-  id: "e1",
-  line: "red",
-  spline_control_points: [  // 4 points per cubic segment
-    [x0, y0, z0],  // p0 (start)
-    [x1, y1, z1],  // p1 (start tangent)
-    [x2, y2, z2],  // p2 (end tangent)
-    [x3, y3, z3]   // p3 (end)
-  ],
-  radius: 1.8,
-  stats: {
-    avg_speed_ms: 12.5,
-    trace_count: 150,
-    mean_accel: 0.3
+```json
+{
+  "edge_id": "euston-warren-street-northern",
+  "spline": {
+    "type": "catmull-rom",
+    "segments": [
+      {
+        "p0": [0, 0, 0],
+        "p1": [50, 2, 0],
+        "p2": [150, -1, 0],
+        "p3": [200, 0, 0]
+      }
+    ],
+    "tension": 0.5
   }
 }
 ```
 
-## Next Steps
-1. Implement WGS84 to ENU conversion in data pipeline
-2. Generate spline control points from existing lat/lon/elevation points
-3. Export to glTF using `dart_gltf` or `gltf` package
-4. Test rendering test dataset
+For v1, the existing 10-point linear interpolation is fine. Upgrade to Catmull-Rom when the pipeline produces smooth curves.
+
+## Tube Tunnel Geometry
+
+Generate a tube around the spline:
+
+```json
+{
+  "tunnel": {
+    "radius": 1.8,
+    "cross_section_segments": 8,
+    "closed": true,
+    "wall_material": {
+      "color": "#2d2d2d",
+      "metalness": 0.3,
+      "roughness": 0.8
+    }
+  }
+}
+```
+
+The mobile app generates the tube mesh at render time from the spline + radius. This keeps the model payload small (no vertex data) and lets the app control LOD.
+
+## LOD Strategy
+
+| LOD | Edges | Spline Points | Tube Segments | Use Case |
+|-----|-------|---------------|---------------|----------|
+| 0 | All | 10 interpolated | None (line) | Overview / minimap |
+| 1 | Visible | 50 interpolated | 8 per segment | Default view |
+| 2 | Near | Catmull-Rom control points | 16 per segment | Detail inspection |
+
+Implement LOD selection based on camera distance to the edge or edge length on screen.
+
+## Per-Edge Statistics as Visual Properties
+
+```json
+{
+  "visualization": {
+    "color_by": "speed",
+    "speed_range": [5.0, 20.0],
+    "color_map": [
+      {"value": 5.0, "color": "#ff4444"},
+      {"value": 12.0, "color": "#ffaa00"},
+      {"value": 20.0, "color": "#44ff44"}
+    ],
+    "width_by": "trace_count",
+    "width_range": [0.5, 3.0]
+  }
+}
+```
+
+The mobile app interpolates colors and widths from the range, using the edge's stats. No server-side mesh generation needed.
+
+## Model Output Structure
+
+```json
+{
+  "format_version": 2,
+  "revision": 147,
+  "coordinate_system": "enu",
+  "origin": {"lat": 51.5153, "lon": -0.1420, "elevation": 30.0},
+  "stations": [
+    {"id": "euston", "position": [0, 0, 0], "name": "Euston"}
+  ],
+  "lines": [
+    {"id": "northern", "name": "Northern", "color": "#000000"}
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "euston",
+      "to": "warren-street",
+      "line": "northern",
+      "spline": {
+        "type": "linear",
+        "points": [[0,0,0], [50,2,0], ...]
+      },
+      "stats": {
+        "num_traces": 47,
+        "avg_speed_ms": 12.3,
+        "mean_accel": [0.3, 0.1, 0.0]
+      },
+      "tunnel": {"radius": 1.8}
+    }
+  ],
+  "visualization": {
+    "color_by": "speed",
+    "width_by": "trace_count"
+  }
+}
+```
+
+## Flutter 3D Rendering Options
+
+| Package | Type | Notes |
+|---------|------|-------|
+| `flutter_cube` | Custom mesh | Simple, no deps, CPU render |
+| `flame_3d` | Game engine | Overkill for a map viewer |
+| `flutter_gl` | OpenGL wrapper | Requires native interop |
+| Custom `CustomPainter` | 2D canvas | **Recommended for v1** — draw splines as lines with varying width/color. Fast, no 3D deps, works on all platforms. |
+| `model_viewer_plus` | glTF viewer | For v2 when glTF export is ready |
+
+**Recommendation for v1**: Use `InteractiveViewer` + `CustomPainter` (already implemented in `map_view.dart`). Add tunnel visualization as a 2D projection (edge width represents depth, color represents elevation) rather than true 3D. This gives a useful visualization with zero additional dependencies.
