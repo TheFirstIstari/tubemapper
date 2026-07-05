@@ -17,3 +17,6 @@ mobile/ios/.symlinks/
 .DS_Store
 *.swp
 *.swo
+mobile/ios/build/
+render-server/target/
+*.db
