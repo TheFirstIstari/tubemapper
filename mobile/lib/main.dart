@@ -270,7 +270,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 8),
                 Text('Workers', style: Theme.of(context).textTheme.titleSmall),
                 ...(_status!.workers.map((w) =>
-                    _row('${w.url}', 'r${w.modelRevision}'))),
+                    _row(w.url, 'r${w.modelRevision}'))),
               ],
             ] else
               const Text('Offline — start server and pull to refresh'),

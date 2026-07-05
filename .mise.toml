@@ -3,3 +3,41 @@ rust = "1.96.0"
 
 [settings]
 experimental = true
+
+[tasks.android]
+description = "Build Android APK (debug)"
+run = "SERVER_URL=${SERVER_URL:-http://localhost:3000} flutter build apk --debug --dart-define=SERVER_URL=$SERVER_URL"
+dir = "mobile"
+
+[tasks.ios]
+description = "Build iOS debug (unsigned)"
+run = "SERVER_URL=${SERVER_URL:-http://localhost:3000} flutter build ios --debug --no-codesign --dart-define=SERVER_URL=$SERVER_URL"
+dir = "mobile"
+
+[tasks.clean]
+description = "Clean all build artifacts"
+run = "flutter clean && cd ../render-server && cargo clean"
+dir = "mobile"
+
+[tasks.server]
+description = "Run the render server"
+run = "cargo run"
+dir = "render-server"
+
+[tasks.lint]
+description = "Run all linters"
+run = "flutter analyze && cd ../render-server && cargo check"
+dir = "mobile"
+
+[tasks.tag]
+description = "Tag a release from the current version in pubspec.yaml"
+run = "VERSION=$(grep '^version:' pubspec.yaml | head -1 | awk '{print $2}' | cut -d+ -f1) && git add pubspec.yaml && git commit -m \"release: $VERSION\" --allow-empty && git tag \"v$VERSION\" && git push origin \"v$VERSION\" && echo \"Pushed v$VERSION -- GH Actions builds the release.\""
+dir = "mobile"
+
+[tasks.release]
+description = "Alias for tag"
+depends = ["tag"]
+
+[tasks.ci]
+description = "Lint check (CI gate)"
+depends = ["lint"]

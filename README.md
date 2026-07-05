@@ -15,7 +15,7 @@ tubemapper/
 │       └── pipeline.rs      # Per-trace processing stub
 ├── shared/                  # Shared schemas (protobuf)
 ├── NetworkDefinitions/      # JSON network definitions (any rail system)
-└── .mise.toml               # Rust toolchain via mise
+└── .mise.toml               # Mise: toolchain + run tasks
 ```
 
 ## Collecting the First Trace
@@ -87,14 +87,31 @@ Every push to `main` and every tag `v*` triggers GitHub Actions:
 
 **Release a new version:**
 ```bash
-# Bump the version number in pubspec.yaml
-make bump
-
-# Tag and push — GitHub Actions builds + attaches the artifacts
-make release
+# Edit version in mobile/pubspec.yaml (e.g. 1.0.0 → 1.1.0)
+# Then tag and push — GitHub Actions builds + attaches the artifacts
+mise run tag
 ```
 
-The release workflow builds both Android APK and iOS debug builds, attaches them to a GitHub Release, and auto-generates release notes from commits.
+Or in one shot:
+```bash
+# Set new version and tag
+sed -i '' 's/^version:.*/version: 1.1.0+1/' mobile/pubspec.yaml
+mise run tag
+```
+
+**Local builds:**
+```bash
+mise run server       # Start render server
+mise run android      # Build debug APK
+mise run ios          # Build debug iOS (unsigned)
+mise run lint         # Run all linters
+mise run clean        # Clean artifacts
+```
+
+Override server URL for local builds:
+```bash
+SERVER_URL=http://192.168.1.5:3000 mise run android
+```
 
 **For CI:** The server URL is injected via `--dart-define=SERVER_URL=...`. Set it in `.github/workflows/build.yml` under `env.SERVER_URL` for your production server address.
 
