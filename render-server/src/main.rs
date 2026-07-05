@@ -91,11 +91,12 @@ async fn upload_trace(
         }
     }
 
-    // Process trace
+    // Process trace (sync — no IO, pure computation)
     let rev = {
         let mut graph = state.graph.write().await;
-        pipeline::process_trace(&trace, &mut graph).await
+        pipeline::process_trace(&trace, &mut graph)
     };
+    let rev = rev.unwrap_or(0);
 
     // Persist
     persistence::save_trace(&state.pool, &trace).await;
