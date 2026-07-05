@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package tubemapper.shared;
+
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message SensorSample {
+  double timestamp = 1;
+  Vec3 accelerometer = 2;   // m/s² (gravity-compensated)
+  Vec3 gyroscope = 3;       // rad/s
+  Vec3 magnetometer = 4;    // µT (optional, 0 = unavailable)
+  Vec3 raw_accel = 5;       // raw with gravity
+  MotionClass motion_class = 6;
+}
+
+enum MotionClass {
+  UNKNOWN = 0;
+  STATIONARY = 1;
+  WALKING = 2;
+  TRAIN = 3;
+}
+
+message GpsFix {
+  double timestamp = 1;
+  double lat = 2;
+  double lon = 3;
+  float accuracy_m = 4;
+  float elevation_m = 5;
+}
+
+message StationDetected {
+  string station_id = 1;
+  double timestamp = 2;
+}
+
+message TraceUpload {
+  string trace_id = 1;
+  string device_id = 2;       // ephemeral, no user identity
+  string network_id = 3;      // "london-underground"
+  repeated string station_sequence = 4;  // stations visited in order
+  repeated SensorSample samples = 5;
+  repeated GpsFix gps_fixes = 6;
+  repeated StationDetected station_detections = 7;
+}
+
+message TraceResponse {
+  string trace_id = 1;
+  bool accepted = 2;
+  uint32 model_revision_bumped = 3;
+  string message = 4;
+}
