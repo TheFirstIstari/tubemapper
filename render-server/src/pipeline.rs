@@ -1,11 +1,8 @@
 use crate::model::{Trace, TubeGraph};
 
-/// Process a single trace: integrate IMU, estimate per-edge spline, update graph.
+/// Process a single trace: assign samples to edges by contiguous blocks,
+/// compute dwell time, accumulate IMU data, refine spline.
 /// Returns the new model revision.
-///
-/// ponytail: simple approach — project station-sequence into a path,
-/// compute per-edge acceleration statistics, refine spline midpoint.
-/// Upgrade to full Kalman smoother + graph SLAM when multi-trace data is available.
 pub async fn process_trace(trace: &Trace, graph: &mut TubeGraph) -> u64 {
     graph.total_traces += 1;
 
@@ -15,23 +12,29 @@ pub async fn process_trace(trace: &Trace, graph: &mut TubeGraph) -> u64 {
         .map(|w| (w[0].as_str(), w[1].as_str()))
         .collect();
 
-    for (from_id, to_id) in &windows {
-        // Find or create edge
+    if windows.is_empty() || trace.samples.is_empty() {
+        graph.revision += 1;
+        return graph.revision;
+    }
+
+    // Assign contiguous sample blocks to edges
+    let block_size = trace.samples.len() / windows.len();
+    for (i, (from_id, to_id)) in windows.iter().enumerate() {
+        let start = i * block_size;
+        let end = if i == windows.len() - 1 {
+            trace.samples.len()
+        } else {
+            start + block_size
+        };
+        let edge_samples = &trace.samples[start..end.min(trace.samples.len())];
+
         if let Some(edge) = graph.edges.iter_mut().find(|e| {
             (e.from == *from_id && e.to == *to_id)
                 || (e.from == *to_id && e.to == *from_id)
         }) {
             edge.num_traces += 1;
 
-            // Classify samples that belong to this edge
-            // ponytail: split samples equally among edges in the sequence.
-            let samples_per_edge = trace.samples.len() / windows.len().max(1);
-            let start = (edge.num_traces as usize).saturating_mul(samples_per_edge)
-                / (edge.num_traces as usize + 1).max(1);
-            let end = (start + samples_per_edge / (edge.num_traces as usize + 1).max(1))
-                .min(trace.samples.len());
-            let edge_samples = &trace.samples[start..end];
-
+            // Motion class counts
             for sample in edge_samples {
                 *edge
                     .motion_samples
@@ -39,42 +42,63 @@ pub async fn process_trace(trace: &Trace, graph: &mut TubeGraph) -> u64 {
                     .or_insert(0) += 1;
             }
 
-            // Compute average acceleration vector for this edge
-            // This tells us the train's acceleration profile between stations
-            if !edge_samples.is_empty() {
-                let mut avg_accel = [0.0f64; 3];
-                for s in edge_samples {
-                    for i in 0..3 {
-                        avg_accel[i] += s.accelerometer[i];
-                    }
-                }
-                let n = edge_samples.len() as f64;
-                for i in 0..3 {
-                    avg_accel[i] /= n;
-                }
+            // Dwell time from first→last timestamp on this edge
+            let dwell_s = if edge_samples.len() >= 2 {
+                (edge_samples.last().unwrap().timestamp
+                    - edge_samples.first().unwrap().timestamp)
+                    .abs()
+            } else {
+                1.0
+            };
+            edge.avg_speed_ms = if dwell_s > 0.0 && edge.length_m > 0 {
+                Some(edge.length_m as f64 / dwell_s)
+            } else {
+                None
+            };
 
-                // Refine spline midpoint based on acceleration direction
-                // ponytail: shift the midpoint spline point along the acceleration vector.
-                // This very roughly nudges the path toward the actual curve.
-                // Real fix: integrate gyro + accel into 6-DOF pose estimate.
-                let from_station = graph.stations.iter().find(|s| s.id == *from_id);
-                let to_station = graph.stations.iter().find(|s| s.id == *to_id);
-                if let (Some(_fs), Some(_ts)) = (from_station, to_station) {
-                    if edge.spline_points.len() >= 3 {
-                        let mid_idx = edge.spline_points.len() / 2;
-                        // Nudge midpoint by acceleration direction (scaled down)
-                        // ponytail: _fs and _ts are available for elevation-based refinement
-                        let scale = 0.001; // tiny: 1mm per m/s²
-                        edge.spline_points[mid_idx][0] += avg_accel[0] * scale;
-                        edge.spline_points[mid_idx][1] += avg_accel[1] * scale;
-                        edge.spline_points[mid_idx][2] += avg_accel[2] * scale * 10.0; // vertical exaggeration
-                    }
-                }
+            // Accumulate acceleration in world frame (yaw-corrected)
+            // ponytail: integrate gyro z-axis for heading, rotate accel by heading.
+            // Full 6-DOF fusion (pitch/roll from gravity vector) is deferred.
+            let mut cumul_heading = 0.0;
+            let mut world_accels: Vec<[f64; 3]> = Vec::with_capacity(edge_samples.len());
+
+            for s in edge_samples {
+                cumul_heading += s.gyroscope[2] * 0.04; // 40ms sample period
+                let (sin_h, cos_h) = cumul_heading.sin_cos();
+                // Rotate accel by heading (z-axis rotation)
+                let wx = s.accelerometer[0] * cos_h - s.accelerometer[1] * sin_h;
+                let wy = s.accelerometer[0] * sin_h + s.accelerometer[1] * cos_h;
+                world_accels.push([wx, wy, s.accelerometer[2]]);
             }
+
+            // Compute mean world-frame acceleration for this trace on this edge
+            let mean_accel = if !world_accels.is_empty() {
+                let n = world_accels.len() as f64;
+                let sum: [f64; 3] = world_accels
+                    .iter()
+                    .fold([0.0, 0.0, 0.0], |acc, v| {
+                        [acc[0] + v[0], acc[1] + v[1], acc[2] + v[2]]
+                    });
+                [sum[0] / n, sum[1] / n, sum[2] / n]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+
+            // Refine spline: displace interior points by mean acceleration
+            // ponytail: uniform displacement, upgrade to per-segment when heading stabilizes.
+            const DISPLACEMENT_SCALE: f64 = 0.01;
+            let interior_count = edge.spline_points.len().saturating_sub(2);
+            for pt in edge.spline_points.iter_mut().skip(1).take(interior_count) {
+                pt[0] += mean_accel[0] * DISPLACEMENT_SCALE;
+                pt[1] += mean_accel[1] * DISPLACEMENT_SCALE;
+                pt[2] += mean_accel[2] * DISPLACEMENT_SCALE * 5.0; // vertical exaggeration
+            }
+
+            // Store mean accel for this trace on edge stats
+            edge.mean_accel = mean_accel;
         }
     }
 
-    // Bump revision
     graph.revision += 1;
     graph.revision
 }

@@ -108,7 +108,6 @@ async fn upload_trace(
     // Persist edge stats
     let graph_snapshot = { state.graph.read().await.clone() };
     for edge in &graph_snapshot.edges {
-        let avg_speed = compute_avg_speed(edge, &state.network);
         persistence::save_edge_stats(
             &state.pool,
             &edge.id,
@@ -116,8 +115,9 @@ async fn upload_trace(
             &edge.to,
             &edge.line,
             edge.num_traces,
-            avg_speed,
+            edge.avg_speed_ms,
             &edge.spline_points,
+            edge.mean_accel,
         )
         .await;
     }
@@ -131,18 +131,6 @@ async fn upload_trace(
         message: format!("trace processed, {} samples", trace.samples.len()),
     }))
 }
-
-/// ponytail: rough avg speed = edge length / dwell time estimate.
-/// Real fix: use timestamp-delta between first/last sample on edge.
-fn compute_avg_speed(edge: &model::Edge, _net: &NetworkDefinition) -> Option<f64> {
-    if edge.num_traces == 0 {
-        return None;
-    }
-    // ponytail: assume 30s average dwell between stations
-    let dwell_s = 30.0;
-    Some(edge.length_m as f64 / dwell_s)
-}
-
 async fn get_model(State(state): State<AppState>) -> Json<serde_json::Value> {
     let graph = state.graph.read().await;
     let edge_stats = persistence::load_edge_stats(&state.pool).await;

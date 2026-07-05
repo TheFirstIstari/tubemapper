@@ -38,6 +38,7 @@ pub struct EdgeDef {
     pub line: String,
     pub direction: String,
     pub length_m: u32,
+    #[serde(default)]
     pub track_km: f64,
 }
 
@@ -81,12 +82,11 @@ pub struct Edge {
     pub to: String,
     pub line: String,
     pub length_m: u32,
-    // Spline control points: each is [x, y, z] in local coords.
-    // ponytail: simple linear interpolation between stations as prior.
-    // Upgrade to Catmull-Rom spline with multiple control points when optimizing.
     pub spline_points: Vec<[f64; 3]>,
     pub num_traces: u64,
-    pub motion_samples: HashMap<String, u64>, // motion_class → sample count
+    pub motion_samples: HashMap<String, u64>,
+    pub avg_speed_ms: Option<f64>,
+    pub mean_accel: [f64; 3],
 }
 
 /// A sensor trace uploaded from the mobile app.
@@ -139,17 +139,19 @@ impl TubeGraph {
             .map(|e| {
                 let from_station = net.stations.iter().find(|s| s.id == e.from).unwrap();
                 let to_station = net.stations.iter().find(|s| s.id == e.to).unwrap();
-                // ponytail: prior spline = straight line between stations + midpoint at half elevation
-                // Once we have real traces, this gets refined
-                let spline_points = vec![
-                    [from_station.lat, from_station.lon, from_station.elevation],
-                    [
-                        (from_station.lat + to_station.lat) / 2.0,
-                        (from_station.lon + to_station.lon) / 2.0,
-                        (from_station.elevation + to_station.elevation) / 2.0,
-                    ],
-                    [to_station.lat, to_station.lon, to_station.elevation],
-                ];
+                // ponytail: prior spline = 10-point linear interpolation along the edge.
+                // Once we have real traces, spline_points get displaced by accumulated IMU data.
+                let steps = 10;
+                let spline_points: Vec<[f64; 3]> = (0..steps)
+                    .map(|i| {
+                        let t = i as f64 / (steps - 1) as f64;
+                        [
+                            from_station.lat + (to_station.lat - from_station.lat) * t,
+                            from_station.lon + (to_station.lon - from_station.lon) * t,
+                            from_station.elevation + (to_station.elevation - from_station.elevation) * t,
+                        ]
+                    })
+                    .collect();
 
                 Edge {
                     id: e.id.clone(),
@@ -160,6 +162,8 @@ impl TubeGraph {
                     spline_points,
                     num_traces: 0,
                     motion_samples: HashMap::new(),
+                    avg_speed_ms: None,
+                    mean_accel: [0.0, 0.0, 0.0],
                 }
             })
             .collect();

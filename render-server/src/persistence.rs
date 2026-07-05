@@ -7,7 +7,15 @@ use chrono::Utc;
 use sqlx::sqlite::SqlitePool;
 
 pub async fn init_pool(path: &str) -> SqlitePool {
-    let pool = SqlitePool::connect(path).await.unwrap();
+    let abs_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let full = cwd.join(path);
+        full.to_string_lossy().to_string()
+    };
+    let conn_str = format!("sqlite://{}?mode=rwc", abs_path);
+    let pool = SqlitePool::connect(&conn_str).await.unwrap();
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS traces (
             trace_id TEXT PRIMARY KEY,
@@ -42,7 +50,8 @@ pub async fn init_pool(path: &str) -> SqlitePool {
             line TEXT NOT NULL,
             num_traces INTEGER NOT NULL DEFAULT 0,
             avg_speed_ms REAL,
-            spline_points TEXT NOT NULL
+            spline_points TEXT NOT NULL,
+            mean_accel TEXT NOT NULL DEFAULT '[0,0,0]'
         )",
     )
     .execute(&pool)
@@ -121,11 +130,13 @@ pub async fn save_edge_stats(
     num_traces: u64,
     avg_speed_ms: Option<f64>,
     spline_points: &[[f64; 3]],
+    mean_accel: [f64; 3],
 ) {
     let spline_json = serde_json::to_string(spline_points).unwrap();
+    let accel_json = serde_json::to_string(&mean_accel).unwrap();
     sqlx::query(
-        "INSERT OR REPLACE INTO edge_stats (edge_id, from_station, to_station, line, num_traces, avg_speed_ms, spline_points)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO edge_stats (edge_id, from_station, to_station, line, num_traces, avg_speed_ms, spline_points, mean_accel)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(edge_id)
     .bind(from)
@@ -134,23 +145,26 @@ pub async fn save_edge_stats(
     .bind(num_traces as i64)
     .bind(avg_speed_ms)
     .bind(&spline_json)
+    .bind(&accel_json)
     .execute(pool)
     .await
     .unwrap();
 }
 
 pub async fn load_edge_stats(pool: &SqlitePool) -> Vec<serde_json::Value> {
-    let rows: Vec<(String, String, String, String, i64, Option<f64>, String)> = sqlx::query_as(
-        "SELECT edge_id, from_station, to_station, line, num_traces, avg_speed_ms, spline_points FROM edge_stats WHERE num_traces > 0",
+    let rows: Vec<(String, String, String, String, i64, Option<f64>, String, String)> = sqlx::query_as(
+        "SELECT edge_id, from_station, to_station, line, num_traces, avg_speed_ms, spline_points, mean_accel FROM edge_stats WHERE num_traces > 0",
     )
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
     rows.into_iter()
-        .map(|(id, from, to, line, n, speed, spline)| {
+        .map(|(id, from, to, line, n, speed, spline, accel)| {
             let pts: Vec<[f64; 3]> =
                 serde_json::from_str(&spline).unwrap_or_default();
+            let mean_accel: [f64; 3] =
+                serde_json::from_str(&accel).unwrap_or([0.0, 0.0, 0.0]);
             serde_json::json!({
                 "id": id,
                 "from": from,
@@ -159,6 +173,7 @@ pub async fn load_edge_stats(pool: &SqlitePool) -> Vec<serde_json::Value> {
                 "num_traces": n,
                 "avg_speed_ms": speed,
                 "spline_points": pts,
+                "mean_accel": mean_accel,
             })
         })
         .collect()
