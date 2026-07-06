@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'services/sensor_recorder.dart';
 import 'services/geofence_trigger.dart';
 import 'services/api_client.dart';
@@ -38,7 +39,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Server URL: override via --dart-define=SERVER_URL=https://...
   // CI builds inject a production URL; local dev defaults to localhost.
   static const String _defaultUrl = String.fromEnvironment(
@@ -64,14 +65,40 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _api = ApiClient(_serverUrl);
-    _recorder = SensorRecorder(
-      serverUrl: _serverUrl,
-      deviceId: _deviceId,
-    );
-    // Create placeholder geofence, real one is created in _init after stations load
-    _geofence = GeofenceTrigger(_recorder, []);
-    _init();
+    WidgetsBinding.instance.addObserver(this);
+    _loadSettings().then((_) {
+      _api = ApiClient(_serverUrl);
+      _recorder = SensorRecorder(
+        serverUrl: _serverUrl,
+        deviceId: _deviceId,
+      );
+      // Create placeholder geofence, real one is created in _init after stations load
+      _geofence = GeofenceTrigger(_recorder, []);
+      _init();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _recorder.pauseRecording();
+    } else if (state == AppLifecycleState.resumed) {
+      _recorder.resumeRecording();
+    }
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _serverUrl = prefs.getString('server_url') ?? _defaultUrl;
+      _deviceId = prefs.getString('device_id') ?? 'device-${DateTime.now().millisecondsSinceEpoch}';
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('server_url', _serverUrl);
+    await prefs.setString('device_id', _deviceId);
   }
 
   Future<void> _init() async {
@@ -151,6 +178,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _recorder.dispose();
     _geofence.dispose();
     super.dispose();
@@ -192,10 +220,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     setState(() => _serverUrl = url);
                     _api.updateUrl(url);
                     _recorder.updateConfig(serverUrl: url);
+                    _saveSettings();
                   },
                   onDeviceIdChanged: (id) {
                     setState(() => _deviceId = id);
                     _recorder.updateConfig(deviceId: id);
+                    _saveSettings();
                   },
                 ),
               ],
