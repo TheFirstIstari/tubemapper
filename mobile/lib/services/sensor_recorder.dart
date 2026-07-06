@@ -51,6 +51,22 @@ class SensorRecorder {
 
   bool get isRecording => _isRecording;
 
+  /// Pause sensor subscriptions (app backgrounded).
+  void pauseRecording() {
+    if (!_isRecording) return;
+    _accelSub?.pause();
+    _gyroSub?.pause();
+    _magSub?.pause();
+  }
+
+  /// Resume sensor subscriptions (app foregrounded).
+  void resumeRecording() {
+    if (!_isRecording) return;
+    _accelSub?.resume();
+    _gyroSub?.resume();
+    _magSub?.resume();
+  }
+
   void startJourney(String stationId, {String? journeyId}) {
     if (_isRecording) return;
     _isRecording = true;
