@@ -1,7 +1,7 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -84,6 +84,17 @@ async fn upload_trace(
 ) -> Result<Json<TraceUploadResponse>, StatusCode> {
     let trace_id = trace.trace_id.clone();
 
+    // Input validation: station sequence bounds
+    if trace.station_sequence.len() < 2 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if trace.station_sequence.len() > 50 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if trace.samples.len() > 100_000 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Validate station sequence
     for station_id in &trace.station_sequence {
         if !state.network.station_ids.contains(station_id) {
@@ -99,17 +110,24 @@ async fn upload_trace(
     let rev = rev.unwrap_or(0);
 
     // Persist
-    persistence::save_trace(&state.pool, &trace).await;
-    persistence::save_model_state(&state.pool, rev, {
+    if let Err(e) = persistence::save_trace(&state.pool, &trace).await {
+        info!("Failed to save trace {}: {}", trace_id, e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    if let Err(e) = persistence::save_model_state(&state.pool, rev, {
         let g = state.graph.read().await;
         g.total_traces
     })
-    .await;
+    .await
+    {
+        info!("Failed to save model state: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // Persist edge stats
     let graph_snapshot = { state.graph.read().await.clone() };
     for edge in &graph_snapshot.edges {
-        persistence::save_edge_stats(
+        if let Err(e) = persistence::save_edge_stats(
             &state.pool,
             &edge.id,
             &edge.from,
@@ -120,7 +138,10 @@ async fn upload_trace(
             &edge.spline_points,
             edge.mean_accel,
         )
-        .await;
+        .await
+        {
+            info!("Failed to save edge stats {}: {}", edge.id, e);
+        }
     }
 
     info!("Trace {} processed -> revision {}", trace_id, rev);
@@ -132,6 +153,7 @@ async fn upload_trace(
         message: format!("trace processed, {} samples", trace.samples.len()),
     }))
 }
+
 async fn get_model(State(state): State<AppState>) -> Json<serde_json::Value> {
     let graph = state.graph.read().await;
     let edge_stats = persistence::load_edge_stats(&state.pool).await;
@@ -160,6 +182,55 @@ async fn get_model(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// GET /api/v1/network — download the full network definition
+async fn get_network(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let net = &state.network;
+    Json(serde_json::json!({
+        "id": net.id,
+        "name": net.name,
+        "lines": net.lines,
+        "stations": net.stations,
+        "edges": net.edges,
+    }))
+}
+
+/// GET /api/v1/traces — list all traces (paginated, newest first)
+async fn list_traces(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let traces = persistence::list_traces(&state.pool).await;
+    Json(serde_json::json!({ "traces": traces }))
+}
+
+/// DELETE /api/v1/trace/:trace_id — delete a single trace
+async fn delete_trace(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let deleted = persistence::delete_trace(&state.pool, &trace_id).await;
+    if deleted {
+        let mut graph = state.graph.write().await;
+        graph.revision += 1;
+        Ok(Json(serde_json::json!({
+            "deleted": true,
+            "trace_id": trace_id,
+            "revision_bumped": graph.revision
+        })))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// GET /api/v1/edges/:edge_id — per-edge detailed statistics
+async fn get_edge_stats(
+    State(state): State<AppState>,
+    Path(edge_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let stats = persistence::load_edge_stats_single(&state.pool, &edge_id).await;
+    match stats {
+        Some(s) => Ok(Json(s)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
 async fn register_worker(
     State(state): State<AppState>,
     Json(reg): Json<WorkerRegistration>,
@@ -174,18 +245,6 @@ async fn worker_heartbeat(
 ) -> StatusCode {
     state.worker_manager.heartbeat(hb).await;
     StatusCode::OK
-}
-
-/// GET /api/v1/network — download the full network definition
-async fn get_network(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let net = &state.network;
-    Json(serde_json::json!({
-        "id": net.id,
-        "name": net.name,
-        "lines": net.lines,
-        "stations": net.stations,
-        "edges": net.edges,
-    }))
 }
 
 #[tokio::main]
@@ -235,8 +294,11 @@ async fn main() {
     let app = Router::new()
         .route("/api/v1/status", get(status))
         .route("/api/v1/trace", post(upload_trace))
+        .route("/api/v1/traces", get(list_traces))
+        .route("/api/v1/trace/{trace_id}", delete(delete_trace))
         .route("/api/v1/model", get(get_model))
         .route("/api/v1/network", get(get_network))
+        .route("/api/v1/edges/{edge_id}", get(get_edge_stats))
         .route("/api/v1/workers/register", post(register_worker))
         .route("/api/v1/workers/heartbeat", post(worker_heartbeat))
         .layer(tower_http::cors::CorsLayer::permissive())
