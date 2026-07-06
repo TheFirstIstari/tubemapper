@@ -19,7 +19,7 @@ jobs:
         working-directory: mobile
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-ation@v2
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
       - run: flutter pub get
@@ -34,7 +34,7 @@ jobs:
         working-directory: mobile
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-ation@v2
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
       - run: flutter pub get
@@ -54,7 +54,7 @@ jobs:
         working-directory: mobile
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-ation@v2
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
       - run: flutter pub get
