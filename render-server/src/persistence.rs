@@ -67,7 +67,8 @@ pub async fn init_pool(path: &str) -> SqlitePool {
     pool
 }
 
-pub async fn save_trace(pool: &SqlitePool, trace: &Trace) {
+/// Returns Ok(()) on success, Err on DB failure.
+pub async fn save_trace(pool: &SqlitePool, trace: &Trace) -> Result<(), sqlx::Error> {
     let start_time = trace
         .samples
         .first()
@@ -101,8 +102,8 @@ pub async fn save_trace(pool: &SqlitePool, trace: &Trace) {
             .unwrap_or("unknown"),
     )
     .execute(pool)
-    .await
-    .unwrap();
+    .await?;
+    Ok(())
 }
 
 pub async fn load_model_state(pool: &SqlitePool) -> (u64, u64) {
@@ -117,15 +118,15 @@ pub async fn load_model_state(pool: &SqlitePool) -> (u64, u64) {
     }
 }
 
-pub async fn save_model_state(pool: &SqlitePool, revision: u64, total_traces: u64) {
+pub async fn save_model_state(pool: &SqlitePool, revision: u64, total_traces: u64) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE model_state SET revision = ?, total_traces = ? WHERE id = 1",
     )
     .bind(revision as i64)
     .bind(total_traces as i64)
     .execute(pool)
-    .await
-    .unwrap();
+    .await?;
+    Ok(())
 }
 
 pub async fn save_edge_stats(
@@ -138,7 +139,7 @@ pub async fn save_edge_stats(
     avg_speed_ms: Option<f64>,
     spline_points: &[[f64; 3]],
     mean_accel: [f64; 3],
-) {
+) -> Result<(), sqlx::Error> {
     let spline_json = serde_json::to_string(spline_points).unwrap();
     let accel_json = serde_json::to_string(&mean_accel).unwrap();
     sqlx::query(
@@ -154,8 +155,8 @@ pub async fn save_edge_stats(
     .bind(&spline_json)
     .bind(&accel_json)
     .execute(pool)
-    .await
-    .unwrap();
+    .await?;
+    Ok(())
 }
 
 pub async fn load_edge_stats(pool: &SqlitePool) -> Vec<serde_json::Value> {
@@ -184,4 +185,67 @@ pub async fn load_edge_stats(pool: &SqlitePool) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// List all traces (paginated, newest first)
+pub async fn list_traces(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let rows: Vec<(String, String, String, String, i64, i64, i64, String)> = sqlx::query_as(
+        "SELECT trace_id, device_token, from_station, to_station, start_time, end_time, sample_count, motion_class
+         FROM traces ORDER BY start_time DESC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(id, device, from, to, start, end, count, motion)| {
+            serde_json::json!({
+                "trace_id": id,
+                "device_id": device,
+                "from_station": from,
+                "to_station": to,
+                "start_time": start,
+                "end_time": end,
+                "sample_count": count,
+                "motion_class": motion,
+            })
+        })
+        .collect()
+}
+
+/// Delete a trace by ID. Returns true if a row was deleted.
+pub async fn delete_trace(pool: &SqlitePool, trace_id: &str) -> bool {
+    sqlx::query("DELETE FROM traces WHERE trace_id = ?")
+        .bind(trace_id)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+}
+
+/// Load per-edge stats for a single edge.
+pub async fn load_edge_stats_single(pool: &SqlitePool, edge_id: &str) -> Option<serde_json::Value> {
+    let rows: Vec<(String, String, String, String, i64, Option<f64>, String, String)> = sqlx::query_as(
+        "SELECT edge_id, from_station, to_station, line, num_traces, avg_speed_ms, spline_points, mean_accel
+         FROM edge_stats WHERE edge_id = ?",
+    )
+    .bind(edge_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter().next().map(|(id, from, to, line, n, speed, spline, accel)| {
+        let pts: Vec<[f64; 3]> = serde_json::from_str(&spline).unwrap_or_default();
+        let mean_accel: [f64; 3] = serde_json::from_str(&accel).unwrap_or([0.0, 0.0, 0.0]);
+        serde_json::json!({
+            "id": id,
+            "from": from,
+            "to": to,
+            "line": line,
+            "num_traces": n,
+            "avg_speed_ms": speed,
+            "spline_points": pts,
+            "mean_accel": mean_accel,
+        })
+    })
 }
