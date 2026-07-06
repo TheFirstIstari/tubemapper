@@ -3,6 +3,16 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'models.dart';
 
+/// Exception thrown by ApiClient on HTTP or network errors.
+class ApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  ApiException(this.message, {this.statusCode});
+
+  @override
+  String toString() => 'ApiException: $message${statusCode != null ? ' ($statusCode)' : ''}';
+}
+
 /// Communicates with the tube-mapper render server.
 class ApiClient {
   String _baseUrl;
